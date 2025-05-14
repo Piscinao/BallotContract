@@ -3,160 +3,247 @@
 pragma solidity >=0.7.0 <0.9.0;
 
 /** 
- * @title Ballot
- * @dev Implements voting process along with vote delegation
+ * @title Enhanced Ballot
+ * @dev Implementa um processo de votação seguro e transparente na blockchain
+ * 
+ * Este contrato demonstra vários conceitos importantes da blockchain:
+ * 1. Imutabilidade: Uma vez que um voto é registrado e revelado, não pode ser alterado
+ * 2. Transparência: Todas as ações são registradas publicamente através de eventos
+ * 3. Descentralização: Não há uma autoridade central controlando os votos
+ * 4. Consenso: O resultado é determinado automaticamente baseado nas regras do contrato
  */
 contract Ballot {
-    // This declares a new complex type which will
-    // be used for variables later.
-    // It will  represent a single voter.
+    // Estruturas de dados armazenadas permanentemente na blockchain
     struct Voter {
-        uint weight; // weight is accumulated by delegation
-        bool voted;  // if true, that person already voted
-        address delegate; // person delegated to
-        uint vote;   // index of the voted proposal
+        uint256 weight;           // peso do voto (acumulado por delegação)
+        bool voted;              // se já votou
+        address delegate;        // pessoa para quem delegou
+        uint256 vote;           // índice da proposta votada
+        bytes32 secretHash;     // hash do voto secreto (usando criptografia na blockchain)
+        bool hasRevealedVote;   // se já revelou o voto secreto
     }
 
-    // This is a type for a single proposal.
+    // As propostas também são armazenadas permanentemente na blockchain
     struct Proposal {
-        // If you can limit the length to a certain number of bytes, 
-        // always use one of bytes1 to bytes32 because they are much cheaper
-        bytes32 name;   // short name (up to 32 bytes)
-        uint voteCount; // number of accumulated votes
+        bytes32 name;           // nome curto (até 32 bytes para otimizar gas)
+        uint256 voteCount;      // número de votos acumulados
+        string description;     // descrição detalhada (armazenada como string dinâmica)
     }
 
-    address public chairperson;
-
-    // This declares a state variable that
-    // stores a 'Voter' struct for each possible address.
+    // Variáveis de estado - Armazenadas permanentemente no storage da blockchain
+    // 'immutable' significa que não pode ser alterado após a implantação, economizando gas
+    address public immutable chairperson;
+    
+    // Timestamps da blockchain são usados para controle temporal
+    uint256 public votingEndTime;    // Timestamp do fim da votação
+    uint256 public revealEndTime;    // Timestamp do fim da fase de revelação
+    bool public votingEnded;
+    
+    // Mapping: estrutura especial da blockchain que mapeia endereços a dados
     mapping(address => Voter) public voters;
-
-    // A dynamically-sized array of 'Proposal' structs.
+    // Array dinâmico: pode crescer, mas aumenta o custo de gas
     Proposal[] public proposals;
+    
+    // Eventos: permitem rastreamento eficiente de ações na blockchain
+    // 'indexed' permite filtrar eventos específicos (até 3 por evento)
+    event VotingStarted(uint256 endTime);
+    event VoterRegistered(address indexed voter);
+    event VoteDelegated(address indexed from, address indexed to);
+    event VoteCast(address indexed voter, bytes32 secretHash);
+    event VoteRevealed(address indexed voter, uint256 proposal);
+    event VoteCancelled(address indexed voter);
+    event VotingEnded(uint256 winningProposal);
+
+    // Modificadores: reduzem código duplicado e aumentam segurança
+    modifier onlyChairperson() {
+        // msg.sender é uma variável global que representa o endereço que chamou a função
+        require(msg.sender == chairperson, "Apenas o presidente pode executar esta acao");
+        _;
+    }
+
+    // block.timestamp é o timestamp atual do bloco na blockchain
+    modifier votingOpen() {
+        require(block.timestamp < votingEndTime, "Votacao encerrada");
+        _;
+    }
+
+    modifier revealPhase() {
+        require(block.timestamp >= votingEndTime && block.timestamp < revealEndTime, "Fora da fase de revelacao");
+        _;
+    }
 
     /** 
-     * @dev Create a new ballot to choose one of 'proposalNames'.
-     * @param proposalNames names of proposals
+     * @dev Constructor: executado apenas uma vez na implantação do contrato
+     * 
+     * Conceitos blockchain demonstrados:
+     * - Implantação de contrato
+     * - Inicialização de estado
+     * - Gas cost: arrays maiores = maior custo
+     * - Timestamp blockchain
      */
-    constructor(bytes32[] memory proposalNames) {
+    constructor(
+        bytes32[] memory proposalNames,      // array na memory (temporário)
+        string[] memory descriptions,        // strings são mais caras em gas
+        uint256 votingPeriod,               // duração em segundos
+        uint256 revealPeriod                // período de revelação
+    ) {
+        require(proposalNames.length == descriptions.length, "Numero de nomes e descricoes deve ser igual");
+        require(votingPeriod > 0 && revealPeriod > 0, "Periodos devem ser maiores que zero");
+        
+        // msg.sender no constructor é quem está implantando o contrato
         chairperson = msg.sender;
         voters[chairperson].weight = 1;
-
-        // For each of the provided proposal names,
-        // create a new proposal object and add it
-        // to the end of the array.
-        for (uint i = 0; i < proposalNames.length; i++) {
-            // 'Proposal({...})' creates a temporary
-            // Proposal object and 'proposals.push(...)'
-            // appends it to the end of 'proposals'.
+        
+        // Loop aumenta o custo de gas proporcionalmente ao número de propostas
+        for (uint256 i = 0; i < proposalNames.length; i++) {
             proposals.push(Proposal({
                 name: proposalNames[i],
-                voteCount: 0
+                voteCount: 0,
+                description: descriptions[i]
             }));
         }
-    }
-
-     /** 
-     * @dev Give 'voter' the right to vote on this ballot. May only be called by 'chairperson'.
-     * @param voter address of voter
-     */
-    function giveRightToVote(address voter) external {
-        // If the first argument of `require` evaluates
-        // to 'false', execution terminates and all
-        // changes to the state and to Ether balances
-        // are reverted.
-        // This used to consume all gas in old EVM versions, but
-        // not anymore.
-        // It is often a good idea to use 'require' to check if
-        // functions are called correctly.
-        // As a second argument, you can also provide an
-        // explanation about what went wrong.
-        require(
-            msg.sender == chairperson,
-            "Only chairperson can give right to vote."
-        );
-        require(
-            !voters[voter].voted,
-            "The voter already voted."
-        );
-        require(voters[voter].weight == 0, "Voter already has the right to vote.");
-        voters[voter].weight = 1;
-    }
-
-    /**
-     * @dev Delegate your vote to the voter 'to'.
-     * @param to address to which vote is delegated
-     */
-    function delegate(address to) external {
-        // assigns reference
-        Voter storage sender = voters[msg.sender];
-        require(sender.weight != 0, "You have no right to vote");
-        require(!sender.voted, "You already voted.");
-
-        require(to != msg.sender, "Self-delegation is disallowed.");
-
-        // Forward the delegation as long as
-        // 'to' also delegated.
-        // In general, such loops are very dangerous,
-        // because if they run too long, they might
-        // need more gas than is available in a block.
-        // In this case, the delegation will not be executed,
-        // but in other situations, such loops might
-        // cause a contract to get "stuck" completely.
-        while (voters[to].delegate != address(0)) {
-            to = voters[to].delegate;
-
-            // We found a loop in the delegation, not allowed.
-            require(to != msg.sender, "Found loop in delegation.");
-        }
-
-        Voter storage delegate_ = voters[to];
-
-        // Voters cannot delegate to accounts that cannot vote.
-        require(delegate_.weight >= 1);
-
-        // Since 'sender' is a reference, this
-        // modifies 'voters[msg.sender]'.
-        sender.voted = true;
-        sender.delegate = to;
-
-        if (delegate_.voted) {
-            // If the delegate already voted,
-            // directly add to the number of votes
-            proposals[delegate_.vote].voteCount += sender.weight;
-        } else {
-            // If the delegate did not vote yet,
-            // add to her weight.
-            delegate_.weight += sender.weight;
-        }
-    }
-
-    /**
-     * @dev Give your vote (including votes delegated to you) to proposal 'proposals[proposal].name'.
-     * @param proposal index of proposal in the proposals array
-     */
-    function vote(uint proposal) external {
-        Voter storage sender = voters[msg.sender];
-        require(sender.weight != 0, "Has no right to vote");
-        require(!sender.voted, "Already voted.");
-        sender.voted = true;
-        sender.vote = proposal;
-
-        // If 'proposal' is out of the range of the array,
-        // this will throw automatically and revert all
-        // changes.
-        proposals[proposal].voteCount += sender.weight;
+        
+        // block.timestamp é o timestamp do bloco atual
+        votingEndTime = block.timestamp + votingPeriod;
+        revealEndTime = votingEndTime + revealPeriod;
+        
+        emit VotingStarted(votingEndTime);
     }
 
     /** 
-     * @dev Computes the winning proposal taking all previous votes into account.
-     * @return winningProposal_ index of winning proposal in the proposals array
+     * @dev Registra um novo votante
+     * 
+     * Conceitos blockchain demonstrados:
+     * - Controle de acesso (onlyChairperson)
+     * - Modificação de estado
+     * - Eventos para rastreabilidade
+     * - Validação de endereços
      */
-    function winningProposal() public view
-            returns (uint winningProposal_)
-    {
-        uint winningVoteCount = 0;
-        for (uint p = 0; p < proposals.length; p++) {
+    function giveRightToVote(address voter) external onlyChairperson votingOpen {
+        require(voter != address(0), "Endereco invalido");
+        require(!voters[voter].voted, "Votante ja votou");
+        require(voters[voter].weight == 0, "Votante ja tem direito ao voto");
+        
+        voters[voter].weight = 1;
+        emit VoterRegistered(voter);
+    }
+
+    /**
+     * @dev Sistema de delegação de votos
+     * 
+     * Conceitos blockchain demonstrados:
+     * - Delegação de direitos
+     * - Prevenção de loops infinitos (gas limit)
+     * - Storage vs Memory
+     * - Acumulação de peso dos votos
+     */
+    function delegate(address to) external votingOpen {
+        require(to != address(0), "Endereco invalido");
+        // storage: referência direta ao estado do contrato
+        Voter storage sender = voters[msg.sender];
+        
+        require(sender.weight != 0, "Sem direito a voto");
+        require(!sender.voted, "Ja votou");
+        require(to != msg.sender, "Auto-delegacao nao permitida");
+        
+        // Loop potencialmente perigoso - limitado pelo gas
+        while (voters[to].delegate != address(0)) {
+            to = voters[to].delegate;
+            require(to != msg.sender, "Loop de delegacao detectado");
+        }
+        
+        Voter storage delegate_ = voters[to];
+        require(delegate_.weight >= 1, "Delegado sem direito a voto");
+        
+        sender.voted = true;
+        sender.delegate = to;
+        
+        if (delegate_.voted) {
+            proposals[delegate_.vote].voteCount += sender.weight;
+        } else {
+            delegate_.weight += sender.weight;
+        }
+        
+        emit VoteDelegated(msg.sender, to);
+    }
+
+    /**
+     * @dev Sistema de votação secreta usando hash
+     * 
+     * Conceitos blockchain demonstrados:
+     * - Criptografia na blockchain (keccak256)
+     * - Commit-reveal pattern
+     * - Privacidade vs Transparência
+     * - Otimização de gas com bytes32
+     */
+    function castSecretVote(bytes32 secretHash) external votingOpen {
+        Voter storage sender = voters[msg.sender];
+        require(sender.weight != 0, "Sem direito a voto");
+        require(!sender.voted, "Ja votou");
+        require(secretHash != 0, "Hash invalido");
+        
+        sender.secretHash = secretHash;
+        sender.voted = true;
+        
+        emit VoteCast(msg.sender, secretHash);
+    }
+
+    /**
+     * @dev Revelação do voto secreto
+     * 
+     * Conceitos blockchain demonstrados:
+     * - Verificação de hash na blockchain
+     * - Fases temporais controladas por timestamp
+     * - Validação de dados off-chain/on-chain
+     */
+    function revealVote(uint256 proposal, bytes32 salt) external revealPhase {
+        Voter storage sender = voters[msg.sender];
+        require(sender.voted && !sender.hasRevealedVote, "Voto ja revelado ou nao registrado");
+        require(proposal < proposals.length, "Proposta invalida");
+        
+        // Recalcula o hash para verificar se corresponde ao registrado
+        bytes32 computedHash = keccak256(abi.encodePacked(proposal, salt));
+        require(computedHash == sender.secretHash, "Hash nao corresponde");
+        
+        sender.hasRevealedVote = true;
+        sender.vote = proposal;
+        proposals[proposal].voteCount += sender.weight;
+        
+        emit VoteRevealed(msg.sender, proposal);
+    }
+
+    /**
+     * @dev Cancelamento de voto não revelado
+     * 
+     * Conceitos blockchain demonstrados:
+     * - Reversão de estado
+     * - Limitações de modificação
+     * - Economia de gas (zerando valores)
+     */
+    function cancelVote() external votingOpen {
+        Voter storage sender = voters[msg.sender];
+        require(sender.voted && !sender.hasRevealedVote, "Voto nao pode ser cancelado");
+        
+        sender.voted = false;
+        sender.secretHash = 0;  // Economiza gas zerando o valor
+        
+        emit VoteCancelled(msg.sender);
+    }
+
+    /**
+     * @dev Cálculo da proposta vencedora
+     * 
+     * Conceitos blockchain demonstrados:
+     * - Funções view (não modificam estado)
+     * - Iteração em arrays (custo de gas)
+     * - Leitura de estado
+     */
+    function winningProposal() public view returns (uint256 winningProposal_) {
+        require(block.timestamp >= revealEndTime, "Votacao ainda nao encerrada");
+        uint256 winningVoteCount = 0;
+        
+        // Loop sobre array: custoso em gas, mas é view
+        for (uint256 p = 0; p < proposals.length; p++) {
             if (proposals[p].voteCount > winningVoteCount) {
                 winningVoteCount = proposals[p].voteCount;
                 winningProposal_ = p;
@@ -164,13 +251,43 @@ contract Ballot {
         }
     }
 
-    /** 
-     * @dev Calls winningProposal() function to get the index of the winner contained in the proposals array and then
-     * @return winnerName_ the name of the winner
+    /**
+     * @dev Retorna o nome do vencedor
+     * 
+     * Conceitos blockchain demonstrados:
+     * - Retorno de tipos fixos (bytes32)
+     * - Composição de funções
      */
-    function winnerName() external view
-            returns (bytes32 winnerName_)
-    {
+    function winnerName() external view returns (bytes32 winnerName_) {
         winnerName_ = proposals[winningProposal()].name;
+    }
+
+    /**
+     * @dev Retorna a descrição do vencedor
+     * 
+     * Conceitos blockchain demonstrados:
+     * - Retorno de strings (tipo dinâmico)
+     * - Uso de memory para tipos dinâmicos
+     */
+    function winnerDescription() external view returns (string memory description) {
+        description = proposals[winningProposal()].description;
+    }
+
+    /**
+     * @dev Status atual da votação
+     * 
+     * Conceitos blockchain demonstrados:
+     * - Enums na blockchain
+     * - Timestamps e controle temporal
+     * - Funções view para consulta
+     */
+    function getVotingStatus() external view returns (uint8 status) {
+        if (block.timestamp < votingEndTime) {
+            return 0; // Votação em andamento
+        } else if (block.timestamp < revealEndTime) {
+            return 1; // Fase de revelação
+        } else {
+            return 2; // Encerrada
+        }
     }
 }
